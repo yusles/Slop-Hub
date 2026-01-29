@@ -164,6 +164,23 @@ MainTab:CreateToggle({
     Callback = function(v) InfiniteJumpEnabled = v end
 })
 
+MainTab:CreateToggle({
+    Name = "Remove Fog", 
+    CurrentValue = false, 
+    Callback = function(v) 
+        _G.RemoveFogEnabled = v 
+    end
+})
+
+MainTab:CreateToggle({
+    Name = "Full Bright", 
+    CurrentValue = false, 
+    Callback = function(v) 
+        _G.FullBrightEnabled = v 
+    end
+})
+
+
 -- Auto-Collect UI
 AutoTab:CreateSection("Live Diagnostics")
 local DiagPara = AutoTab:CreateParagraph({Title = "System: Standby", Content = "Key: 0 | Range: 25"})
@@ -206,3 +223,36 @@ PathTab:CreateSection("Path Settings")
 PathTab:CreateSlider({Name = "Speed", Range = {1, 22}, CurrentValue = 18, Increment = 1, Callback = function(v) waypointConfig.speed = v end})
 PathTab:CreateSlider({Name = "Stop Delay", Range = {0, 5}, CurrentValue = 0.5, Increment = 0.1, Callback = function(v) waypointConfig.delay = v end})
 PathTab:CreateToggle({Name = "Loop Path", CurrentValue = true, Callback = function(v) waypointConfig.loopPath = v end})
+
+-- Combined Fog & Brightness Loop
+task.spawn(function()
+    local Lighting = game:GetService("Lighting")
+    
+    -- Store original settings to restore them if toggled off
+    local origBrightness = Lighting.Brightness
+    local origClock = Lighting.ClockTime
+    local origAmbient = Lighting.Ambient
+
+    while true do
+        if _G.RemoveFogEnabled then
+            Lighting.FogEnd = 9e9
+            Lighting.FogStart = 0
+            for _, obj in pairs(Lighting:GetChildren()) do
+                if obj:IsA("Atmosphere") then obj.Density = 0 end
+            end
+        end
+
+        if _G.FullBrightEnabled then
+            Lighting.Brightness = 2
+            Lighting.ClockTime = 14
+            Lighting.Ambient = Color3.fromRGB(255, 255, 255)
+            Lighting.OutdoorAmbient = Color3.fromRGB(255, 255, 255)
+            Lighting.GlobalShadows = false
+        else
+            -- Optional: Restore some normalcy if turned off
+            Lighting.GlobalShadows = true
+        end
+        
+        task.wait(2) 
+    end
+end)
