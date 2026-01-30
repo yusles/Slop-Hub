@@ -3,21 +3,21 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local TweenService = game:GetService("TweenService")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
-local ByteNetRemote = ReplicatedStorage:WaitForChild("ByteNetReliable")
+local ByteNetReliable = ReplicatedStorage:WaitForChild("ByteNetReliable", 5)
 local LocalPlayer = game:GetService("Players").LocalPlayer
 
 local Window = Rayfield:CreateWindow({
     Name = "🤮 Sl🅾p Hub 🤮",
     LoadingTitle = "ByteNet Reversal Suite",
-	LoadingSubtitle = "AI SLOP",
-    ConfigurationSaving = { Enabled = true, FolderName = "GeminiMaster", FileName = "Config" }
+    LoadingSubtitle = "AI SLOP",
+    ConfigurationSaving = { Enabled = true, FolderName = "Slop", FileName = "Config" }
 })
 
 -- --- GLOBAL STATE ---
-local AutoPickupEnabled = false
+local MineRange = 22
 local PickupRange = 25
-local CurrentKey = 0
-local SweepWidth = 3
+local PickupWhitelist = {} -- Table to store selected items
+local PickupBlacklist = {}
 
 local WalkSpeedValue = 16
 local JumpPowerValue = 50
@@ -34,47 +34,6 @@ local waypointConfig = {
     easingDirection = Enum.EasingDirection.InOut
 }
 
--- --- STAT FORCER (The bypass for resetting WalkSpeed) ---
-task.spawn(function()
-    while true do
-        RunService.RenderStepped:Wait() -- Runs every frame
-        local char = LocalPlayer.Character
-        local hum = char and char:FindFirstChildOfClass("Humanoid")
-        if hum then
-            -- Constantly reapplies values to win the 'tug-of-war' with game scripts
-            if hum.WalkSpeed ~= WalkSpeedValue then
-                hum.WalkSpeed = WalkSpeedValue
-            end
-            if hum.JumpPower ~= JumpPowerValue then
-                hum.UseJumpPower = true
-                hum.JumpPower = JumpPowerValue
-            end
-        end
-    end
-end)
-
--- --- BYTENET SNIFFER ---
-local oldFire
-oldFire = hookfunction(Instance.new("RemoteEvent").FireServer, function(self, ...)
-    local args = {...}
-    if self == ByteNetRemote and typeof(args[1]) == "buffer" then
-        local b = args[1]
-        if buffer.readu8(b, 1) == 213 then
-            CurrentKey = buffer.readu8(b, 3)
-        end
-    end
-    return oldFire(self, ...)
-end)
-
--- --- HELPER FUNCTIONS ---
-local function firePickup(id, key)
-    local b = buffer.create(6)
-    buffer.writeu8(b, 0, 0); buffer.writeu8(b, 1, 213)
-    buffer.writeu8(b, 2, id % 256); buffer.writeu8(b, 3, key % 256)
-    buffer.writeu8(b, 4, 0); buffer.writeu8(b, 5, 0)
-    ByteNetRemote:FireServer(b)
-end
-
 local vizFolder = workspace:FindFirstChild("WaypointVisualization") or Instance.new("Folder", workspace)
 vizFolder.Name = "WaypointVisualization"
 
@@ -82,177 +41,296 @@ local function updateVisualization()
     vizFolder:ClearAllChildren()
     for i, pos in ipairs(waypoints) do
         local m = Instance.new("Part", vizFolder)
-        m.Shape, m.Size, m.Position, m.Anchored, m.CanCollide = Enum.PartType.Ball, Vector3.new(2,2,2), pos, true, false
-        m.Material, m.Transparency, m.Color = Enum.Material.Neon, 0.4, Color3.fromRGB(255, 0, 255)
+        m.Shape = Enum.PartType.Ball
+        m.Size = Vector3.new(2, 2, 2)
+        m.Position = pos
+        m.Anchored = true
+        m.CanCollide = false
+        m.Material = Enum.Material.Neon
+        m.Transparency = 0.4
+        m.Color = Color3.fromRGB(255, 0, 255) -- Magenta
+        m.Name = "Waypoint_" .. i
     end
 end
 
--- --- INPUT HANDLERS ---
+-- --- HELPER FUNCTIONS ---
+
+local function toLE32(id)
+    if not id then return nil end 
+    local a = string.char(id % 256)
+    local b = string.char(math.floor(id / 256) % 256)
+    local c = string.char(math.floor(id / 65536) % 256)
+    local d = string.char(math.floor(id / 16777216) % 256)
+    return a .. b .. c .. d
+end
+
+local function firePickup(itemID)
+    local header = "\001\213" 
+    local idBytes = toLE32(itemID)
+    if idBytes and ByteNetReliable then
+        local payload = header .. idBytes
+        ByteNetReliable:FireServer(buffer.fromstring(payload))
+    end
+end
+
+local function fireHit(target, context)
+    if not target or not context then return end
+    local header = "\001\017\002\000" 
+    local tBytes = toLE32(target)
+    local cBytes = toLE32(context)
+    if tBytes and cBytes and ByteNetReliable then
+        local payload = header .. tBytes .. cBytes
+        ByteNetReliable:FireServer(buffer.fromstring(payload))
+    end
+end
+
+-- --- UI TABS ---
+local MainTab = Window:CreateTab("Player")
+local AutoTab = Window:CreateTab("Auto-Collect")
+local PathTab = Window:CreateTab("Waypoints")
+
+-- Player UI
+MainTab:CreateSlider({Name = "Walkspeed", Range = {16, 22}, CurrentValue = 20, Increment = 1, Callback = function(v) WalkSpeedValue = v end})
+MainTab:CreateSlider({Name = "JumpPower", Range = {50, 85}, CurrentValue = 65, Increment = 1, Callback = function(v) JumpPowerValue = v end})
+MainTab:CreateSlider({Name = "Hip Height",Range = {0, 8}, CurrentValue = 2, Increment = 0.5, Callback = function(v)
+        local char = LocalPlayer.Character
+        local hum = char and char:FindFirstChildOfClass("Humanoid")
+        if hum then
+            hum.HipHeight = v
+        end
+    end
+})
+MainTab:CreateToggle({Name = "Infinite Jump", CurrentValue = false, Callback = function(v) InfiniteJumpEnabled = v end})
+MainTab:CreateToggle({Name = "Remove Fog", CurrentValue = false, Callback = function(v) _G.RemoveFogEnabled = v end})
+MainTab:CreateToggle({Name = "Full Bright", CurrentValue = false, Callback = function(v) _G.FullBrightEnabled = v end})
+
+-- Auto-Collect UI
+AutoTab:CreateSection("Gold Miner")
+
+AutoTab:CreateToggle({
+    Name = "Gold Miner",
+    CurrentValue = false,
+    Callback = function(Value)
+        _G.UniversalMine = Value
+        task.spawn(function()
+            while _G.UniversalMine do
+                local root = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+                local Res = workspace:FindFirstChild("Resources")
+                if root and Res then
+                    for _, item in pairs(Res:GetChildren()) do
+                        if not _G.UniversalMine then break end
+                        if (root.Position - item:GetPivot().Position).Magnitude < MineRange then
+                            if item.Name == "Gold Node" then
+                                -- Target Part logic remains same as validated
+                                local mainPart = item:FindFirstChild("Gold Node") or item:FindFirstChildWhichIsA("BasePart")
+                                if mainPart then fireHit(mainPart:GetAttribute("EntityID"), item:GetAttribute("EntityID")) end
+                            elseif item.Name == "Ice Chunk" then
+                                local ice = item:FindFirstChild("Ice")
+                                if ice then fireHit(ice:GetAttribute("EntityID"), item:GetAttribute("EntityID")) end
+                                local breaky = item:FindFirstChild("Breakaway")
+                                local nested = breaky and breaky:FindFirstChild("Gold Node")
+                                if nested then 
+                                    local gPart = nested:FindFirstChild("Gold Node")
+                                    if gPart then fireHit(gPart:GetAttribute("EntityID"), nested:GetAttribute("EntityID")) end
+                                end
+                            end
+                        end
+                    end
+                end
+                task.wait(0.1)
+            end
+        end)
+    end
+})
+
+
+
+AutoTab:CreateSlider({
+    Name = "Mining Range",
+    Range = {5, 50},
+    CurrentValue = 25,
+    Increment = 1,
+    Callback = function(v) MineRange = v end
+})
+
+AutoTab:CreateSection("Auto-Pickup")
+
+AutoTab:CreateToggle({
+    Name = "Packet Auto-Pickup",
+    CurrentValue = false,
+    Callback = function(Value)
+        _G.PickupEnabled = Value
+        task.spawn(function()
+            while _G.PickupEnabled do
+                local char = LocalPlayer.Character
+                local root = char and char:FindFirstChild("HumanoidRootPart")
+                local ItemsFolder = workspace:FindFirstChild("Items")
+                
+                if root and ItemsFolder then
+                    for _, item in pairs(ItemsFolder:GetChildren()) do
+                        if not _G.PickupEnabled then break end
+                        
+                        local itemID = item:GetAttribute("EntityID")
+                        if itemID then
+                            local itemName = item.Name
+                            
+                            -- 1. Check Blacklist
+                            local isBlacklisted = false
+                            for _, name in pairs(PickupBlacklist) do
+                                if itemName == name then
+                                    isBlacklisted = true
+                                    break
+                                end
+                            end
+
+                            if not isBlacklisted then
+                                -- 2. Check Whitelist
+                                local isWhitelisted = (#PickupWhitelist == 0)
+                                if not isWhitelisted then
+                                    for _, name in pairs(PickupWhitelist) do
+                                        if itemName == name then
+                                            isWhitelisted = true
+                                            break
+                                        end
+                                    end
+                                end
+
+                                -- 3. Check Distance and Fire
+                                if isWhitelisted then
+                                    local dist = (root.Position - item:GetPivot().Position).Magnitude
+                                    if dist < PickupRange then
+                                        firePickup(itemID)
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+                task.wait(0.1) -- Keep this to prevent crashing/rate-limiting
+            end
+        end)
+    end,
+})
+
+AutoTab:CreateDropdown({
+   Name = "Pickup Whitelist",
+   Options = {"Bloodfruit", "Raw Iron", "Iron", "Raw Gold", "Gold", "Steel Mix", "Steel", "Raw Adurite", "Adurite", "Crystal Chunk", "Magnetite Ore", "Magnetite", "Emerald", "Pink Diamond"},
+   CurrentOption = {},
+   MultipleOptions = true, -- The "Multiselect" logic
+   Callback = function(Options)
+       PickupWhitelist = Options
+   end,
+})
+
+-- Drop this into the Auto-Collect Tab section
+AutoTab:CreateDropdown({
+   Name = "Pickup Blacklist",
+   Options = {"Ice Cube", "Leaves", "Wood", "Stone", "Sand"},
+   CurrentOption = {},
+   MultipleOptions = true,
+   Callback = function(Options)
+       PickupBlacklist = Options
+   end,
+})
+
+AutoTab:CreateSlider({
+    Name = "Pickup Range",
+    Range = {5, 50},
+    CurrentValue = 25,
+    Increment = 1,
+    Callback = function(v) PickupRange = v end
+})
+
+-- Waypoints UI
+
+PathTab:CreateSection("Movement Controls")
+PathTab:CreateToggle({Name = "Enable Pathing", CurrentValue = false, Callback = function(v)
+    isRunningWaypoints = v
+    if v then
+        task.spawn(function()
+            if #waypoints == 0 then return end
+            repeat
+                for _, pos in ipairs(waypoints) do
+                    if not isRunningWaypoints then break end
+                    local root = LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+                    if root then
+                        local dist = (pos - root.Position).Magnitude
+                        currentTween = TweenService:Create(root, TweenInfo.new(dist/waypointConfig.speed, waypointConfig.easingStyle), {CFrame = CFrame.new(pos)})
+                        currentTween:Play()
+                        currentTween.Completed:Wait()
+                        task.wait(waypointConfig.delay)
+                    end
+                end
+            until not waypointConfig.loopPath or not isRunningWaypoints
+        end)
+    elseif currentTween then currentTween:Cancel() end
+end})
+
+-- ADD WAYPOINT
+PathTab:CreateButton({
+    Name = "Add Waypoint", 
+    Callback = function()
+        if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then
+            table.insert(waypoints, LocalPlayer.Character.HumanoidRootPart.Position)
+            updateVisualization() -- Restores the circle
+        end
+    end
+})
+
+PathTab:CreateButton({
+    Name = "Remove Last Waypoint",
+    Callback = function()
+        if #waypoints > 0 then
+            table.remove(waypoints, #waypoints) -- Removes the very last entry
+            updateVisualization() -- Refreshes the Neon balls in the workspace
+        end
+    end
+})
+
+-- CLEAR ALL WAYPOINTS
+PathTab:CreateButton({
+    Name = "Clear Waypoints", 
+    Callback = function() 
+        waypoints = {}
+        isRunningWaypoints = false
+        if currentTween then currentTween:Cancel() end 
+        updateVisualization() -- Wipes the circles
+    end
+})
+PathTab:CreateSection("Path Settings")
+PathTab:CreateSlider({
+    Name = "Tween Speed",
+    Range = {1, 22},
+    CurrentValue = 18,
+    Increment = 1,
+    Callback = function(v) waypointConfig.speed = v end
+})
+
+PathTab:CreateSlider({
+    Name = "Stop Delay",
+    Range = {0, 10},
+    CurrentValue = 0.5,
+    Increment = 0.1,
+    Callback = function(v) waypointConfig.delay = v end
+})
+
+PathTab:CreateToggle({Name = "Loop Path", CurrentValue = true, Callback = function(v) waypointConfig.loopPath = v end})
+-- Lighting Loop
+task.spawn(function()
+    local L = game:GetService("Lighting")
+    while true do
+        if _G.RemoveFogEnabled then L.FogEnd = 9e9; L.FogStart = 0 end
+        if _G.FullBrightEnabled then
+            L.Brightness, L.ClockTime, L.GlobalShadows = 2, 14, false
+            L.Ambient, L.OutdoorAmbient = Color3.new(1,1,1), Color3.new(1,1,1)
+        end
+        task.wait(2)
+    end
+end)
+
 UserInputService.JumpRequest:Connect(function()
     if InfiniteJumpEnabled and LocalPlayer.Character then
         local hum = LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
         if hum then hum:ChangeState(Enum.HumanoidStateType.Jumping) end
-    end
-end)
-
--- --- AUTOMATION LOOPS ---
-
--- Pickup Loop
-task.spawn(function()
-    while true do
-        task.wait(0.2)
-        if AutoPickupEnabled and CurrentKey ~= 0 then
-            local root = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
-            if root then
-                for _, item in pairs(workspace.Items:GetChildren()) do
-                    local id = item:GetAttribute("EntityID")
-                    if id and (item:GetPivot().Position - root.Position).Magnitude <= PickupRange then
-                        for i = 0, SweepWidth do firePickup(id, CurrentKey + i) end
-                    end
-                end
-            end
-        end
-    end
-end)
-
--- Tweening Logic
-local function startWaypointTweening()
-    if #waypoints == 0 then return end
-    isRunningWaypoints = true
-    repeat
-        for i, pos in ipairs(waypoints) do
-            if not isRunningWaypoints then break end
-            local root = LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
-            if root then
-                local dist = (pos - root.Position).Magnitude
-                local tInfo = TweenInfo.new(dist/waypointConfig.speed, waypointConfig.easingStyle, waypointConfig.easingDirection)
-                currentTween = TweenService:Create(root, tInfo, {CFrame = CFrame.new(pos)})
-                currentTween:Play()
-                currentTween.Completed:Wait()
-                task.wait(waypointConfig.delay)
-            end
-        end
-    until not waypointConfig.loopPath or not isRunningWaypoints
-end
-
--- --- UI TABS ---
-local MainTab = Window:CreateTab("Player", 4483362458)
-local AutoTab = Window:CreateTab("Auto-Collect", 4483362458)
-local PathTab = Window:CreateTab("Waypoints", 4483362458)
-
--- Player UI
-MainTab:CreateSection("Movement")
-MainTab:CreateSlider({
-    Name = "Walkspeed", 
-    Range = {16, 22}, 
-    CurrentValue = 16, 
-    Increment = 1,
-    Callback = function(v) WalkSpeedValue = v end
-})
-
-MainTab:CreateSlider({
-    Name = "JumpPower", 
-    Range = {50, 85}, 
-    CurrentValue = 50, 
-    Increment = 1,
-    Callback = function(v) JumpPowerValue = v end
-})
-
-MainTab:CreateToggle({
-    Name = "Infinite Jump", 
-    CurrentValue = false, 
-    Callback = function(v) InfiniteJumpEnabled = v end
-})
-
-MainTab:CreateToggle({
-    Name = "Remove Fog", 
-    CurrentValue = false, 
-    Callback = function(v) 
-        _G.RemoveFogEnabled = v 
-    end
-})
-
-MainTab:CreateToggle({
-    Name = "Full Bright", 
-    CurrentValue = false, 
-    Callback = function(v) 
-        _G.FullBrightEnabled = v 
-    end
-})
-
-
--- Auto-Collect UI
-AutoTab:CreateSection("Live Diagnostics")
-local DiagPara = AutoTab:CreateParagraph({Title = "System: Standby", Content = "Key: 0 | Range: 25"})
-
-task.spawn(function()
-    while task.wait(0.5) do
-        DiagPara:Set({Title = "Status: "..(AutoPickupEnabled and "ON" or "OFF"), Content = "Current Key: "..CurrentKey.."\nSweep Window: "..SweepWidth})
-    end
-end)
-
-AutoTab:CreateToggle({Name = "Enable Auto-Pickup", CurrentValue = false, Callback = function(v) AutoPickupEnabled = v end})
-AutoTab:CreateSlider({Name = "Pickup Range", Range = {5, 75}, CurrentValue = 25, Increment = 1, Callback = function(v) PickupRange = v end})
-AutoTab:CreateSlider({Name = "Sweep Width", Range = {1, 10}, CurrentValue = 3, Increment = 1, Callback = function(v) SweepWidth = v end})
-AutoTab:CreateButton({Name = "Brute Force Sync", Callback = function() 
-    local items = workspace.Items:GetChildren()
-    if #items > 0 then for i=0,255 do firePickup(items[1]:GetAttribute("EntityID"), i) end end 
-end})
-
--- Waypoints UI
-PathTab:CreateSection("Movement Controls")
-PathTab:CreateToggle({Name = "Enable Pathing", CurrentValue = false, Callback = function(v)
-    if v then task.spawn(startWaypointTweening) else isRunningWaypoints = false if currentTween then currentTween:Cancel() end end
-end})
-
-PathTab:CreateButton({Name = "Add Waypoint Here", Callback = function()
-    if LocalPlayer.Character then
-        table.insert(waypoints, LocalPlayer.Character.HumanoidRootPart.Position)
-        updateVisualization()
-    end
-end})
-
-PathTab:CreateButton({Name = "Clear All Waypoints", Callback = function() 
-    waypoints = {} 
-    updateVisualization() 
-    isRunningWaypoints = false
-    if currentTween then currentTween:Cancel() end 
-end})
-
-PathTab:CreateSection("Path Settings")
-PathTab:CreateSlider({Name = "Speed", Range = {1, 22}, CurrentValue = 18, Increment = 1, Callback = function(v) waypointConfig.speed = v end})
-PathTab:CreateSlider({Name = "Stop Delay", Range = {0, 5}, CurrentValue = 0.5, Increment = 0.1, Callback = function(v) waypointConfig.delay = v end})
-PathTab:CreateToggle({Name = "Loop Path", CurrentValue = true, Callback = function(v) waypointConfig.loopPath = v end})
-
--- Combined Fog & Brightness Loop
-task.spawn(function()
-    local Lighting = game:GetService("Lighting")
-    
-    -- Store original settings to restore them if toggled off
-    local origBrightness = Lighting.Brightness
-    local origClock = Lighting.ClockTime
-    local origAmbient = Lighting.Ambient
-
-    while true do
-        if _G.RemoveFogEnabled then
-            Lighting.FogEnd = 9e9
-            Lighting.FogStart = 0
-            for _, obj in pairs(Lighting:GetChildren()) do
-                if obj:IsA("Atmosphere") then obj.Density = 0 end
-            end
-        end
-
-        if _G.FullBrightEnabled then
-            Lighting.Brightness = 2
-            Lighting.ClockTime = 14
-            Lighting.Ambient = Color3.fromRGB(255, 255, 255)
-            Lighting.OutdoorAmbient = Color3.fromRGB(255, 255, 255)
-            Lighting.GlobalShadows = false
-        else
-            -- Optional: Restore some normalcy if turned off
-            Lighting.GlobalShadows = true
-        end
-        
-        task.wait(2) 
     end
 end)
