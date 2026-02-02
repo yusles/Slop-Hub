@@ -5,7 +5,8 @@ local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local ByteNetReliable = ReplicatedStorage:WaitForChild("ByteNetReliable", 5)
 local LocalPlayer = game:GetService("Players").LocalPlayer
-
+local char = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+local root = char:WaitForChild("HumanoidRootPart")
 local Window = Rayfield:CreateWindow({
     Name = "🤮 Sl🅾p Hub 🤮",
     LoadingTitle = "ByteNet Reversal Suite",
@@ -14,14 +15,59 @@ local Window = Rayfield:CreateWindow({
 })
 
 -- --- GLOBAL STATE ---
-local MineRange = 22
+local MiningActive = false
+local MineRange = 25
 local PickupRange = 25
-local PickupWhitelist = {} -- Table to store selected items
-local PickupBlacklist = {}
+local orbiton = false
+local orbitradius = 10
+local orbitspeed = 5
+local itemheight = 3
+local attacheditems = {}
+local itemangles = {}
+local AuraConfig = {
+    Enabled = false,
+    Range = 20,
+    Targets = 1,
+    Cooldown = 0.1
+}
+local PickupConfig = {
+    Enabled = false,
+    ChestPickup = false,
+    Range = 20,
+    SelectedItems = {} -- Table to store items selected in the multi-dropdown
+}
 
-local WalkSpeedValue = 16
-local JumpPowerValue = 50
+local WalkSpeedValue = 20
+local JumpPowerValue = 65
+local HipHeightValue = 2
 local InfiniteJumpEnabled = false
+local SlopeClimbEnabled = false
+
+task.spawn(function()
+    while true do
+        RunService.RenderStepped:Wait() -- Runs every frame before rendering
+        local char = LocalPlayer.Character
+        local hum = char and char:FindFirstChildOfClass("Humanoid")
+        
+        if hum then
+            -- Enforce WalkSpeed
+            if hum.WalkSpeed ~= WalkSpeedValue then
+                hum.WalkSpeed = WalkSpeedValue
+            end
+            
+            -- Enforce JumpPower
+            if hum.JumpPower ~= JumpPowerValue then
+                hum.UseJumpPower = true
+                hum.JumpPower = JumpPowerValue
+            end
+
+            -- Enforce HipHeight
+            if hum.HipHeight ~= HipHeightValue then
+                hum.HipHeight = HipHeightValue
+            end
+        end
+    end
+end)
 
 local isRunningWaypoints = false
 local waypoints = {}
@@ -53,7 +99,7 @@ local function updateVisualization()
     end
 end
 
--- --- HELPER FUNCTIONS ---
+-- --- [1] HELPER FUNCTIONS ---
 
 local function toLE32(id)
     if not id then return nil end 
@@ -73,176 +119,259 @@ local function firePickup(itemID)
     end
 end
 
-local function fireHit(target, context)
-    if not target or not context then return end
-    local header = "\001\017\002\000" 
-    local tBytes = toLE32(target)
-    local cBytes = toLE32(context)
-    if tBytes and cBytes and ByteNetReliable then
-        local payload = header .. tBytes .. cBytes
-        ByteNetReliable:FireServer(buffer.fromstring(payload))
+local function getByteNet()
+    local bn = game:GetService("ReplicatedStorage"):FindFirstChild("ByteNetReliable")
+    if not bn then warn("!!! BYTENETRELIABLE NOT FOUND !!!") end
+    return bn
+end
+
+local function decode(str)
+    local b1, b2, b3 = string.byte(str, -4, -2)
+    return b1 + b2 * 256 + b3 * 65536
+end
+
+local function swingencode(ids)
+    if typeof(ids) ~= "table" then ids = {ids} end
+    local count = #ids
+    local out = {string.char(0x00, 0x11, count, 0x00)}
+    for i = 1, count do
+        local num = ids[i]
+        out[#out + 1] = string.char(num % 256, math.floor(num / 256) % 256, math.floor(num / 65536) % 256, 0x00)
+    end
+    return table.concat(out)
+end
+
+local function run(stringg, packett, itemid)
+    local id = typeof(stringg) == "string" and decode(stringg) or stringg
+    local packet
+    if packett == "swing" then
+        packet = swingencode(id)
+    end
+    
+    local remote = game:GetService("ReplicatedStorage"):FindFirstChild("ByteNetReliable")
+    if remote and packet then
+        remote:FireServer(buffer.fromstring(packet))
     end
 end
 
--- --- UI TABS ---
+local function pickupencode(entityid)
+    local b1 = entityid % 256
+    local b2 = math.floor(entityid / 256) % 256
+    local b3 = math.floor(entityid / 65536) % 256
+    return string.char(0x00, 0xD5, b1, b2, b3, 0x00)
+end
+
+local function runPickup(entityid)
+    local packet = pickupencode(entityid)
+    local remote = game:GetService("ReplicatedStorage"):FindFirstChild("ByteNetReliable")
+    if remote then
+        remote:FireServer(buffer.fromstring(packet))
+    end
+end
+
+-- --- [2] THE AUTOMINER LOOP ---
+task.spawn(function()
+    while true do
+        if not AuraConfig.Enabled then
+            task.wait(0.05)
+            continue
+        end
+
+        local targets = {}
+        local allresources = {}
+
+        -- Collect all valid resources from both designated folders
+        for _, r in pairs(workspace.Resources:GetChildren()) do
+            table.insert(allresources, r)
+        end
+        for _, r in pairs(workspace:GetChildren()) do
+            if r:IsA("Model") and r.Name == "Gold Node" then
+                table.insert(allresources, r)
+            end
+        end
+
+        for _, res in pairs(allresources) do
+            if res:IsA("Model") and res:GetAttribute("EntityID") then
+                local eid = res:GetAttribute("EntityID")
+                local ppart = res.PrimaryPart or res:FindFirstChildWhichIsA("BasePart")
+                if ppart then
+                    local dist = (ppart.Position - root.Position).Magnitude
+                    if dist <= AuraConfig.Range then
+                        table.insert(targets, { eid = eid, dist = dist })
+                    end
+                end
+            end
+        end
+
+        if #targets > 0 then
+            table.sort(targets, function(a, b)
+                return a.dist < b.dist
+            end)
+
+            local selectedTargets = {}
+            for i = 1, math.min(AuraConfig.Targets, #targets) do
+                table.insert(selectedTargets, targets[i].eid)
+            end
+
+            run(selectedTargets, "swing")
+        end
+
+        task.wait(AuraConfig.Cooldown)
+    end
+end)
+
+-- --- [3] THE AUTO-PICKUP LOOP ---
+task.spawn(function()
+    while true do
+        local LocalPlayer = game.Players.LocalPlayer
+        local char = LocalPlayer.Character
+        local root = char and char:FindFirstChild("HumanoidRootPart")
+        
+        if root then
+            -- A. Ground Item Pickup
+            if PickupConfig.Enabled then
+                for _, item in ipairs(workspace.Items:GetChildren()) do
+                    if item:IsA("BasePart") or item:IsA("MeshPart") then
+                        local entityid = item:GetAttribute("EntityID")
+                        -- Only pickup if the item is in our allowed list
+                        if entityid and table.find(PickupConfig.SelectedItems, item.Name) then
+                            if (item.Position - root.Position).Magnitude <= PickupConfig.Range then
+                                runPickup(entityid)
+                            end
+                        end
+                    end
+                end
+            end
+
+            -- B. Chest Content Pickup
+            if PickupConfig.ChestPickup then
+                for _, chest in ipairs(workspace.Deployables:GetChildren()) do
+                    if chest:IsA("Model") and chest.Name == "Chest" and chest:FindFirstChild("Contents") then
+                        for _, item in ipairs(chest.Contents:GetChildren()) do
+                            local entityid = item:GetAttribute("EntityID")
+                            if entityid and table.find(PickupConfig.SelectedItems, item.Name) then
+                                -- Check distance from the Chest itself
+                                if (chest:GetPivot().Position - root.Position).Magnitude <= PickupConfig.Range then
+                                    runPickup(entityid)
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+        task.wait(0.01) -- High speed polling from Herkle source
+    end
+end)
+
+
+-- --- [3] UI ELEMENTS ---
 local MainTab = Window:CreateTab("Player")
 local AutoTab = Window:CreateTab("Auto-Collect")
 local PathTab = Window:CreateTab("Waypoints")
 
 -- Player UI
-MainTab:CreateSlider({Name = "Walkspeed", Range = {16, 22}, CurrentValue = 20, Increment = 1, Callback = function(v) WalkSpeedValue = v end})
-MainTab:CreateSlider({Name = "JumpPower", Range = {50, 85}, CurrentValue = 65, Increment = 1, Callback = function(v) JumpPowerValue = v end})
-MainTab:CreateSlider({Name = "Hip Height",Range = {0, 8}, CurrentValue = 2, Increment = 0.5, Callback = function(v)
-        local char = LocalPlayer.Character
-        local hum = char and char:FindFirstChildOfClass("Humanoid")
-        if hum then
-            hum.HipHeight = v
-        end
-    end
+MainTab:CreateSlider({
+    Name = "Walkspeed",
+    Range = {16, 22},
+    CurrentValue = WalkSpeedValue,
+    Increment = 1,
+    Callback = function(Value)
+        WalkSpeedValue = Value -- Updates the value the loop enforces
+    end,
 })
+
+MainTab:CreateSlider({
+    Name = "JumpPower",
+    Range = {50, 85},
+    CurrentValue = JumpPowerValue,
+    Increment = 1,
+    Callback = function(Value)
+        JumpPowerValue = Value -- Updates the value the loop enforces
+    end,
+})
+
+MainTab:CreateSlider({
+    Name = "Hip Height",
+    Range = {0, 10},
+    CurrentValue = HipHeightValue,
+    Increment = 0.1,
+    Callback = function(Value)
+        HipHeightValue = Value -- Updates the value the loop enforces
+    end,
+})
+MainTab:CreateToggle({Name = "Slope Climber", CurrentValue = false, Callback = function(v) _G.SlopeClimbingEnabled = v end})
 MainTab:CreateToggle({Name = "Infinite Jump", CurrentValue = false, Callback = function(v) InfiniteJumpEnabled = v end})
 MainTab:CreateToggle({Name = "Remove Fog", CurrentValue = false, Callback = function(v) _G.RemoveFogEnabled = v end})
 MainTab:CreateToggle({Name = "Full Bright", CurrentValue = false, Callback = function(v) _G.FullBrightEnabled = v end})
 
 -- Auto-Collect UI
-AutoTab:CreateSection("Gold Miner")
+AutoTab:CreateSection("Auto-Miner")
 
 AutoTab:CreateToggle({
-    Name = "Gold Miner",
-    CurrentValue = false,
-    Callback = function(Value)
-        _G.UniversalMine = Value
-        task.spawn(function()
-            while _G.UniversalMine do
-                local root = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
-                local Res = workspace:FindFirstChild("Resources")
-                if root and Res then
-                    for _, item in pairs(Res:GetChildren()) do
-                        if not _G.UniversalMine then break end
-                        if (root.Position - item:GetPivot().Position).Magnitude < MineRange then
-                            if item.Name == "Gold Node" then
-                                -- Target Part logic remains same as validated
-                                local mainPart = item:FindFirstChild("Gold Node") or item:FindFirstChildWhichIsA("BasePart")
-                                if mainPart then fireHit(mainPart:GetAttribute("EntityID"), item:GetAttribute("EntityID")) end
-                            elseif item.Name == "Ice Chunk" then
-                                local ice = item:FindFirstChild("Ice")
-                                if ice then fireHit(ice:GetAttribute("EntityID"), item:GetAttribute("EntityID")) end
-                                local breaky = item:FindFirstChild("Breakaway")
-                                local nested = breaky and breaky:FindFirstChild("Gold Node")
-                                if nested then 
-                                    local gPart = nested:FindFirstChild("Gold Node")
-                                    if gPart then fireHit(gPart:GetAttribute("EntityID"), nested:GetAttribute("EntityID")) end
-                                end
-                            end
-                        end
-                    end
-                end
-                task.wait(0.1)
-            end
-        end)
-    end
+   Name = "Resource Aura",
+   CurrentValue = false,
+   Callback = function(Value)
+      AuraConfig.Enabled = Value
+   end,
 })
 
-
-
 AutoTab:CreateSlider({
-    Name = "Mining Range",
-    Range = {5, 50},
-    CurrentValue = 25,
-    Increment = 1,
-    Callback = function(v) MineRange = v end
+   Name = "Mining Range",
+   Range = {1, 20},
+   Increment = 1,
+   Suffix = "Studs",
+   CurrentValue = 20,
+   Callback = function(Value)
+      AuraConfig.Range = Value
+   end,
+})
+
+AutoTab:CreateDropdown({
+   Name = "Max Targets",
+   Options = {"1", "2", "3", "4", "5", "6"},
+   CurrentOption = {"1"},
+   MultipleOptions = false,
+   Callback = function(Option)
+      AuraConfig.Targets = tonumber(Option[1])
+   end,
 })
 
 AutoTab:CreateSection("Auto-Pickup")
 
+-- --- [4] UI TOGGLE ---
 AutoTab:CreateToggle({
-    Name = "Packet Auto-Pickup",
-    CurrentValue = false,
-    Callback = function(Value)
-        _G.PickupEnabled = Value
-        task.spawn(function()
-            while _G.PickupEnabled do
-                local char = LocalPlayer.Character
-                local root = char and char:FindFirstChild("HumanoidRootPart")
-                local ItemsFolder = workspace:FindFirstChild("Items")
-                
-                if root and ItemsFolder then
-                    for _, item in pairs(ItemsFolder:GetChildren()) do
-                        if not _G.PickupEnabled then break end
-                        
-                        local itemID = item:GetAttribute("EntityID")
-                        if itemID then
-                            local itemName = item.Name
-                            
-                            -- 1. Check Blacklist
-                            local isBlacklisted = false
-                            for _, name in pairs(PickupBlacklist) do
-                                if itemName == name then
-                                    isBlacklisted = true
-                                    break
-                                end
-                            end
+   Name = "Auto Pickup (Ground)",
+   CurrentValue = false,
+   Callback = function(Value) PickupConfig.Enabled = Value end,
+})
 
-                            if not isBlacklisted then
-                                -- 2. Check Whitelist
-                                local isWhitelisted = (#PickupWhitelist == 0)
-                                if not isWhitelisted then
-                                    for _, name in pairs(PickupWhitelist) do
-                                        if itemName == name then
-                                            isWhitelisted = true
-                                            break
-                                        end
-                                    end
-                                end
-
-                                -- 3. Check Distance and Fire
-                                if isWhitelisted then
-                                    local dist = (root.Position - item:GetPivot().Position).Magnitude
-                                    if dist < PickupRange then
-                                        firePickup(itemID)
-                                    end
-                                end
-                            end
-                        end
-                    end
-                end
-                task.wait(0.1) -- Keep this to prevent crashing/rate-limiting
-            end
-        end)
-    end,
+AutoTab:CreateToggle({
+   Name = "Auto Pickup (Chests)",
+   CurrentValue = false,
+   Callback = function(Value) PickupConfig.ChestPickup = Value end,
 })
 
 AutoTab:CreateDropdown({
-   Name = "Pickup Whitelist",
-   Options = {"Bloodfruit", "Raw Iron", "Iron", "Raw Gold", "Gold", "Steel Mix", "Steel", "Raw Adurite", "Adurite", "Crystal Chunk", "Magnetite Ore", "Magnetite", "Emerald", "Pink Diamond"},
-   CurrentOption = {},
-   MultipleOptions = true, -- The "Multiselect" logic
-   Callback = function(Options)
-       PickupWhitelist = Options
-   end,
-})
-
--- Drop this into the Auto-Collect Tab section
-AutoTab:CreateDropdown({
-   Name = "Pickup Blacklist",
-   Options = {"Ice Cube", "Leaves", "Wood", "Stone", "Sand"},
-   CurrentOption = {},
+   Name = "Target Items",
+   Options = {"Bloodfruit", "Log", "Leaves", "Wood", "Raw Iron", "Iron", "Raw Gold", "Gold", "Steel Mix", "Steel", "Raw Adurite", "Adurite", "Crystal Chunk", "Magnetite Ore", "Magnetite", "Emerald", "Pink Diamond"},
+   CurrentOption = {"Gold"},
    MultipleOptions = true,
    Callback = function(Options)
-       PickupBlacklist = Options
+      PickupConfig.SelectedItems = Options -- Updates the list of allowed items
    end,
 })
 
 AutoTab:CreateSlider({
-    Name = "Pickup Range",
-    Range = {5, 50},
-    CurrentValue = 25,
-    Increment = 1,
-    Callback = function(v) PickupRange = v end
+   Name = "Pickup Range",
+   Range = {1, 20},
+   Increment = 1,
+   Suffix = "Studs",
+   CurrentValue = 20,
+   Callback = function(Value) PickupConfig.Range = Value end,
 })
 
 -- Waypoints UI
-
 PathTab:CreateSection("Movement Controls")
 PathTab:CreateToggle({Name = "Enable Pathing", CurrentValue = false, Callback = function(v)
     isRunningWaypoints = v
@@ -315,6 +444,7 @@ PathTab:CreateSlider({
 })
 
 PathTab:CreateToggle({Name = "Loop Path", CurrentValue = true, Callback = function(v) waypointConfig.loopPath = v end})
+
 -- Lighting Loop
 task.spawn(function()
     local L = game:GetService("Lighting")
@@ -324,13 +454,32 @@ task.spawn(function()
             L.Brightness, L.ClockTime, L.GlobalShadows = 2, 14, false
             L.Ambient, L.OutdoorAmbient = Color3.new(1,1,1), Color3.new(1,1,1)
         end
-        task.wait(2)
+        task.wait(1)
     end
 end)
 
+-- Climbing Utilities
 UserInputService.JumpRequest:Connect(function()
     if InfiniteJumpEnabled and LocalPlayer.Character then
         local hum = LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
         if hum then hum:ChangeState(Enum.HumanoidStateType.Jumping) end
+    end
+end)
+
+task.spawn(function()
+    while true do
+        local char = game.Players.LocalPlayer.Character
+        local hum = char and char:FindFirstChild("Humanoid")
+        
+        if hum then
+            if _G.SlopeClimbingEnabled then
+                -- Forces max slope angle to 90 degrees to prevent slipping
+                hum.MaxSlopeAngle = 90
+            else
+                -- Returns to default Roblox physics (approx 46 degrees)
+                hum.MaxSlopeAngle = 46
+            end
+        end
+        task.wait(0.1) -- Frequent enough for physics, but saves performance
     end
 end)
